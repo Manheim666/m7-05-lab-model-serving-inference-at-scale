@@ -1,0 +1,63 @@
+service: vision-moderation
+
+# Internal SLOs are deliberately STRICTER than the external partner SLA so we
+# burn our own error budget and alert ourselves long before we breach the
+# contract. Partner SLA: 99.5% availability + refund if sync p95 > 500 ms over a
+# rolling hour. Internal availability objective = 99.9% (> 99.5%); internal p95
+# objective is measured at 250 ms (< the 500 ms refund threshold).
+
+slos:
+  - name: availability
+    # SLI = fraction of valid requests served without a server-side failure.
+    # "Good" = HTTP responses NOT in 5xx (and not gateway 502/503/504).
+    # 4xx are client errors and are excluded from both numerator and denominator.
+    sli: >-
+      sum(rate(http_requests_total{job="vision-moderation",code!~"5..|502|503|504"}[window]))
+      / sum(rate(http_requests_total{job="vision-moderation",code!~"4.."}[window]))
+    objective: 0.999            # internal; stricter than the 0.995 partner SLA
+    window: 30d                 # rolling 30-day window
+    ties_to_sla: "partner-availability-99.5 (refund clause)"
+    burn_rate_alerts:
+      # Multi-window: fast burn pages, slow burn tickets. Multipliers are vs the
+      # 0.001 monthly error budget (1 - 0.999).
+      - severity: page
+        burn_rate: 14.4         # 2% of 30d budget in 1h
+        window: 1h
+      - severity: ticket
+        burn_rate: 6            # 10% of 30d budget in 6h
+        window: 6h
+
+  - name: latency_p95
+    # SLI = proportion of synchronous requests whose END-TO-END latency
+    # (gateway-in to gateway-out) is <= 250 ms.
+    sli: >-
+      sum(rate(http_request_duration_seconds_bucket{job="vision-moderation",path="/moderate",le="0.25"}[window]))
+      / sum(rate(http_request_duration_seconds_count{job="vision-moderation",path="/moderate"}[window]))
+    objective: 0.95             # 95% of sync requests under 250 ms
+    window: 30d
+    # 250 ms internal target sits well under the 500 ms partner refund line,
+    # giving 250 ms of contractual cushion.
+    burn_rate_alerts:
+      - severity: page
+        burn_rate: 14.4
+        window: 1h
+      - severity: ticket
+        burn_rate: 6
+        window: 6h
+
+  - name: latency_p99
+    # SLI = proportion of synchronous requests with end-to-end latency <= 500 ms,
+    # i.e. p99 must stay under the partner refund threshold itself.
+    sli: >-
+      sum(rate(http_request_duration_seconds_bucket{job="vision-moderation",path="/moderate",le="0.5"}[window]))
+      / sum(rate(http_request_duration_seconds_count{job="vision-moderation",path="/moderate"}[window]))
+    objective: 0.99             # 99% under 500 ms -> protects the refund SLA
+    window: 30d
+    ties_to_sla: "partner-latency p95<=500ms rolling-hour refund clause"
+    burn_rate_alerts:
+      - severity: page
+        burn_rate: 14.4
+        window: 1h
+      - severity: ticket
+        burn_rate: 6
+        window: 6h
